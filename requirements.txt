@@ -6,3 +6,7 @@ opencv-python-headless>=4.8.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
 streamlit-image-coordinates>=0.1.6
+nibabel>=3.2.0
+potpourri3d 
+plotly
+geometric_kernels
