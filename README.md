@@ -10,9 +10,7 @@
 
 Plus a **sliding-window entropy map** for spatial heterogeneity visualization.
 
-## Live Demo
 
-🔗 **Hugging Face Space:** `[your-space-url-here]`
 
 ## Local Setup
 
