@@ -390,34 +390,40 @@ with tab4:
     st.caption("**Interpretation:** Uniform tissue (healthy brain) shows low entropy (dark). "
                "Lesions, tumors, or complex boundaries appear bright — spatially heterogeneous. "
                "Use the window size slider to control spatial resolution vs. sensitivity trade-off.")
-# ── Tab 5: GP on Tumor Surface ───────────────────────────────────────────────────
+
+# ── Tab 5: GP on Tumor Surface ────────────────────────────────────────────────
 with tab5:
-    st.markdown("### 🫀 Gaussian Process Regression on Tumor Surface Mesh")
+    st.markdown("### 🧬 Gaussian Process Regression on Tumor Surface Mesh")
     st.caption(
-        "Upload a 3D tumor mesh (.obj). A radiomic texture feature (e.g. local entropy) is "
-        "computed at each vertex from the ROI A texture statistics, then a GP with a "
-        "geometry-aware kernel interpolates the signal across the surface. "
-        "Compare kernels and visualize posterior mean + uncertainty."
+        "Upload a 3D tumor mesh (.obj). A synthetic radiomic signal is sampled from a GP prior, "
+        "then reconstructed from sparse 'biopsy' observations using a geometry-aware kernel. "
+        "Compare SPDE / Geodesic / RBF kernels and visualise posterior mean + uncertainty."
     )
  
-    # ── Lazy imports (heavy libs only loaded if tab is used) ─────────────────
+    # ── Lazy imports ──────────────────────────────────────────────────────────
     try:
         import potpourri3d as pp3d
         import plotly.graph_objects as go
         import plotly.express as px
         from scipy.special import kv, gamma as scipy_gamma
+        from scipy import stats as sp_stats
         _mesh_libs_ok = True
     except ImportError as _e:
         st.error(f"Missing dependency: {_e}. Run `pip install potpourri3d plotly`.")
         _mesh_libs_ok = False
  
     if _mesh_libs_ok:
-        # ── Mesh upload ──────────────────────────────────────────────────────
-        mesh_file = st.file_uploader("Upload tumor mesh (.obj)", type=["obj"], key="mesh_upload")
  
+        # ── Mesh upload ───────────────────────────────────────────────────────
+        mesh_file = st.file_uploader(
+            "Upload tumor mesh (.obj)", type=["obj"], key="mesh_upload"
+        )
         st.markdown("**No mesh yet?** Download a free example:")
         st.code("https://github.com/alecjacobson/common-3d-test-models  (e.g. spot.obj, armadillo.obj)")
-        st.caption("For a real tumor mesh: export an .obj from 3D Slicer after segmenting a lesion in a NIfTI scan.")
+        st.caption(
+            "For a real tumor mesh: export an .obj from 3D Slicer after segmenting "
+            "a lesion in a NIfTI scan."
+        )
  
         if mesh_file is not None:
             import tempfile
@@ -426,34 +432,33 @@ with tab5:
             def _load_mesh(data: bytes):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".obj") as tmp:
                     tmp.write(data)
-                    tmp_path = tmp.name
-                return pp3d.read_mesh(tmp_path)
+                return pp3d.read_mesh(tmp.name)
  
             v_mesh, f_mesh = _load_mesh(mesh_file.read())
             n_verts = len(v_mesh)
-            st.success(f"Mesh loaded — {n_verts} vertices, {len(f_mesh)} faces")
+            st.success(f"Mesh loaded — {n_verts:,} vertices, {len(f_mesh):,} faces")
  
-            # ── Sidebar-style controls inside the tab ────────────────────────
+            # ── Controls ──────────────────────────────────────────────────────
             col_ctrl1, col_ctrl2 = st.columns(2)
             with col_ctrl1:
                 gp_kernel = st.selectbox(
-                    "Prediction kernel",
-                    ["SPDE", "Geodesic", "Heat"],
-                    help="Kernel used by the GP to interpolate the radiomic signal."
+                    "Prediction kernel", ["SPDE", "Geodesic", "RBF"],
+                    help="Kernel the GP uses to interpolate the radiomic signal."
                 )
                 gt_kernel = st.selectbox(
-                    "Ground-truth kernel (signal generation)",
-                    ["SPDE", "Geodesic", "RBF"],
-                    help="Kernel used to *sample* the synthetic ground-truth radiomic field."
+                    "Ground-truth kernel (signal generation)", ["SPDE", "Geodesic", "RBF"],
+                    help="Kernel used to *sample* the synthetic ground-truth field."
                 )
             with col_ctrl2:
-                gp_nu     = st.slider("Smoothness ν", 0.5, 3.0, 1.5, 0.5, key="gp_nu")
-                gp_kappa  = st.slider("Lengthscale κ", 0.01, 0.30, 0.07, 0.01, key="gp_kappa")
-                gp_noise  = st.slider("Observation noise", 0.0, 0.2, 0.05, 0.01, key="gp_noise")
-                gp_ntrain = st.slider("Training vertices (sparse samples)", 5, min(500, n_verts - 1), 50, key="gp_ntrain")
+                gp_nu    = st.slider("Smoothness ν", 0.5, 3.0, 1.5, 0.5,  key="gp_nu")
+                gp_kappa = st.slider("Lengthscale κ", 0.01, 0.30, 0.07, 0.01, key="gp_kappa")
+                gp_noise = st.slider("Observation noise σ", 0.01, 0.30, 0.05, 0.01, key="gp_noise")
+                gp_ntrain = st.slider(
+                    "Biopsy / training points", 5, min(300, n_verts - 1), 50, key="gp_ntrain"
+                )
  
-            # ── Kernel helpers ───────────────────────────────────────────────
-            def _matern_geo(d, nu, kappa):
+            # ── Kernel builders ───────────────────────────────────────────────
+            def _matern_val(d, nu, kappa):
                 if np.isclose(d, 0):
                     return 1.0
                 x = np.sqrt(2 * nu) * d / kappa
@@ -461,33 +466,29 @@ with tab5:
  
             @st.cache_data(show_spinner="Computing geodesic kernel…")
             def _K_geo(v_b, f_b, idx1_t, idx2_t, nu, kappa):
-                v_b  = np.array(v_b);  f_b  = np.array(f_b)
-                idx1 = list(idx1_t);   idx2 = list(idx2_t)
-                solver = pp3d.MeshHeatMethodDistanceSolver(v_b, f_b)
+                v_arr = np.array(v_b); f_arr = np.array(f_b)
+                idx1 = list(idx1_t);   idx2  = list(idx2_t)
+                solver = pp3d.MeshHeatMethodDistanceSolver(v_arr, f_arr)
                 K = np.zeros((len(idx1), len(idx2)))
                 for i, vi in enumerate(idx1):
                     dists = solver.compute_distance(vi)
                     for j, vj in enumerate(idx2):
-                        K[i, j] = _matern_geo(dists[vj], nu, kappa)
+                        K[i, j] = _matern_val(dists[vj], nu, kappa)
                 return K
  
-            @st.cache_data(show_spinner="Computing heat kernel…")
-            def _K_heat(v_b, f_b, idx1_t, idx2_t):
-                v_b  = np.array(v_b);  f_b  = np.array(f_b)
-                idx1 = list(idx1_t);   idx2 = list(idx2_t)
-                solver = pp3d.MeshVectorHeatSolver(v_b, f_b)
-                K = np.zeros((len(idx1), len(idx2)))
-                for i, vi in enumerate(idx1):
-                    vals = solver.extend_scalar([vi], [1.0])
-                    K[i, :] = vals[list(idx2)]
-                return K
+            def _K_rbf(v_b, idx1_t, idx2_t, kappa):
+                v_arr = np.array(v_b)
+                v1 = v_arr[list(idx1_t)]; v2 = v_arr[list(idx2_t)]
+                diff = v1[:, None, :] - v2[None, :, :]
+                return np.exp(-np.sum(diff ** 2, axis=2) / (2 * kappa ** 2))
+            
  
             def _K_spde(v_b, f_b, idx1_t, idx2_t, nu, kappa):
                 try:
-                    from geometric_kernels.spaces  import Mesh
+                    from geometric_kernels.spaces  import Mesh as GKMesh
                     from geometric_kernels.kernels import MaternGeometricKernel
-                    v_b = np.array(v_b); f_b = np.array(f_b)
-                    space  = Mesh(v_b, f_b)
+                    v_arr = np.array(v_b); f_arr = np.array(f_b)
+                    space  = GKMesh(v_arr, f_arr)
                     kernel = MaternGeometricKernel(space)
                     params = kernel.init_params()
                     params["nu"]          = np.array([nu])
@@ -499,187 +500,244 @@ with tab5:
                     st.warning("geometric_kernels not installed — falling back to Geodesic kernel.")
                     return _K_geo(v_b, f_b, idx1_t, idx2_t, nu, kappa)
  
-            def _K_rbf(v_b, idx1_t, idx2_t, kappa):
-                v_b = np.array(v_b)
-                idx1 = list(idx1_t); idx2 = list(idx2_t)
-                v1 = v_b[idx1]; v2 = v_b[idx2]
-                diff = v1[:, None, :] - v2[None, :, :]
-                d2   = np.sum(diff ** 2, axis=2)
-                return np.exp(-d2 / (2 * kappa ** 2))
- 
-            def _build_K(kernel_name, v_b, f_b, idx1_t, idx2_t, nu, kappa):
-                if kernel_name == "Geodesic":
+            def _build_K(name, v_b, f_b, idx1_t, idx2_t, nu, kappa):
+                if name == "Geodesic":
                     return _K_geo(v_b, f_b, idx1_t, idx2_t, nu, kappa)
-                elif kernel_name == "Heat":
-                    return _K_heat(v_b, f_b, idx1_t, idx2_t)
-                elif kernel_name == "SPDE":
+                elif name == "SPDE":
                     return _K_spde(v_b, f_b, idx1_t, idx2_t, nu, kappa)
-                elif kernel_name == "RBF":
+                elif name == "RBF":
                     return _K_rbf(v_b, idx1_t, idx2_t, kappa)
                 else:
-                    raise ValueError(kernel_name)
+                    raise ValueError(name)
  
-            # ── GP posterior ─────────────────────────────────────────────────
-            def _gp_posterior(K_oo, K_oa, K_aa, y_train, noise):
-                K_oo_n = K_oo + noise * np.eye(K_oo.shape[0])
-                alpha  = np.linalg.solve(K_oo_n, y_train)
-                mu     = K_oa.T @ alpha
-                L      = np.linalg.solve(K_oo_n, K_oa)
-                var    = np.diag(K_aa) - np.sum(K_oa * L, axis=0)
-                var    = np.clip(var, 1e-8, None)
+            # ── GP posterior (memory-safe, no n×n matrix) ─────────────────────
+            def _gp_posterior(K_oo, K_oa, y_train, noise):
+                """
+                K_oo : (n_train, n_train)
+                K_oa : (n_train, n_all)
+                Returns mu (n_all,) and var (n_all,).
+                k(x,x)=1 for normalised kernels so K_aa diagonal = ones.
+                """
+                n_tr = K_oo.shape[0]
+                K_oo_n = K_oo + noise * np.eye(n_tr) + 1e-8 * np.eye(n_tr)
+                L     = np.linalg.cholesky(K_oo_n)
+                alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_train))
+                mu    = K_oa.T @ alpha                      # (n_all,)
+                V     = np.linalg.solve(L, K_oa)           # (n_train, n_all)
+                var   = np.clip(1.0 - np.sum(V ** 2, axis=0), 1e-8, None)  # (n_all,)
                 return mu, var
  
             def _nlpd(mu, var, y_true):
-                return 0.5 * np.mean(np.log(2 * np.pi * var) + (y_true - mu) ** 2 / var)
+                return 0.5 * float(np.mean(np.log(2 * np.pi * var) + (y_true - mu) ** 2 / var))
  
-            # ── Run GP button ────────────────────────────────────────────────
+            # ── Mesh plot helper ──────────────────────────────────────────────
+            def _mesh_fig(values, title, train_i=None, colorscale="Viridis"):
+                fig = go.Figure(data=[go.Mesh3d(
+                    x=v_mesh[:, 0], y=v_mesh[:, 1], z=v_mesh[:, 2],
+                    i=f_mesh[:, 0], j=f_mesh[:, 1], k=f_mesh[:, 2],
+                    intensity=values, colorscale=colorscale, opacity=1.0,
+                    lighting=dict(ambient=0.5, diffuse=1.0, specular=0.4),
+                    showscale=True,
+                )])
+                if train_i is not None:
+                    fig.add_trace(go.Scatter3d(
+                        x=v_mesh[list(train_i), 0],
+                        y=v_mesh[list(train_i), 1],
+                        z=v_mesh[list(train_i), 2],
+                        mode="markers",
+                        marker=dict(size=3, color="cyan", opacity=0.85),
+                        name="Observed (biopsy)"
+                    ))
+                fig.update_layout(
+                    title=dict(text=title, font=dict(size=13)),
+                    scene=dict(
+                        xaxis=dict(visible=False),
+                        yaxis=dict(visible=False),
+                        zaxis=dict(visible=False),
+                    ),
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    height=400,
+                )
+                return fig
+ 
+            # ── Run button ────────────────────────────────────────────────────
             if st.button("▶ Run GP on Mesh", type="primary"):
  
-                rng       = np.random.default_rng(42)
-                perm      = rng.permutation(n_verts)
+                rng  = np.random.default_rng(42)
+                perm = rng.permutation(n_verts)
+ 
                 train_idx = tuple(perm[:gp_ntrain].tolist())
                 test_idx  = tuple(perm[gp_ntrain:].tolist())
                 all_idx   = tuple(range(n_verts))
  
+                # hashable copies for cached functions
                 v_t = tuple(map(tuple, v_mesh))
                 f_t = tuple(map(tuple, f_mesh))
  
-                # ── Synthesize radiomic signal (ground truth) ─────────────
+                # ── Ground truth: sample on a small subset, propagate ─────────
+                # Never build n×n — use at most 300 anchor points.
+                n_gt = min(300, n_verts)
+                gt_anchor_idx = tuple(rng.permutation(n_verts)[:n_gt].tolist())
+ 
                 with st.spinner("Sampling ground-truth radiomic field…"):
-                    K_full_gt = _build_K(gt_kernel, v_t, f_t, all_idx, all_idx, gp_nu, gp_kappa)
-                    K_full_gt += 1e-6 * np.eye(n_verts)
-                    f_true_mesh = rng.multivariate_normal(np.zeros(n_verts), K_full_gt)
+                    K_gt_oo = _build_K(gt_kernel, v_t, f_t,
+                                       gt_anchor_idx, gt_anchor_idx, gp_nu, gp_kappa)
+                    K_gt_oo += 1e-6 * np.eye(n_gt)
+                    f_gt_anchors = rng.multivariate_normal(np.zeros(n_gt), K_gt_oo)
  
-                # ── Noisy observations at train vertices ──────────────────
-                y_train_mesh = f_true_mesh[list(train_idx)] + gp_noise * rng.standard_normal(gp_ntrain)
+                    # Propagate anchor samples to full mesh via GP posterior mean
+                    K_gt_oa = _build_K(gt_kernel, v_t, f_t,
+                                       gt_anchor_idx, all_idx, gp_nu, gp_kappa)
+                    alpha_gt  = np.linalg.solve(K_gt_oo, f_gt_anchors)
+                    f_true_mesh = K_gt_oa.T @ alpha_gt          # (n_verts,)  — no n×n ever
  
-                # ── GP kernels: train×train, train×all, all×all ───────────
+                # ── Noisy train observations ──────────────────────────────────
+                y_train_mesh = (
+                    f_true_mesh[list(train_idx)]
+                    + gp_noise * rng.standard_normal(gp_ntrain)
+                )
+ 
+                # ── Prediction kernel matrices ────────────────────────────────
+                # K_oo : (n_train, n_train)   small
+                # K_oa : (n_train, n_verts)   moderate — e.g. 50 × 111 k = 44 MB
+                # K_aa : NOT built — posterior variance uses 1 - ||V||² trick
                 with st.spinner(f"Computing {gp_kernel} kernel matrices…"):
-                    K_oo = _build_K(gp_kernel, v_t, f_t, train_idx, train_idx, gp_nu, gp_kappa)
-                    K_oa = _build_K(gp_kernel, v_t, f_t, train_idx, all_idx,   gp_nu, gp_kappa)
-                    K_aa_diag = np.ones(n_verts)  # diag only — avoids n×n alloc
+                    K_oo = _build_K(gp_kernel, v_t, f_t,
+                                    train_idx, train_idx, gp_nu, gp_kappa)
+                    K_oa = _build_K(gp_kernel, v_t, f_t,
+                                    train_idx, all_idx, gp_nu, gp_kappa)
  
-                # ── Posterior ─────────────────────────────────────────────
-                with st.spinner("Computing posterior…"):
-                    # for variance we only need diag(K_aa) − diag(K_oa.T @ solve(K_oo, K_oa))
-                    K_oo_n = K_oo + gp_noise * np.eye(gp_ntrain)
-                    alpha  = np.linalg.solve(K_oo_n, y_train_mesh)
-                    mu_all = K_oa.T @ alpha
-                    L_     = np.linalg.solve(K_oo_n, K_oa)         # (n_train, n_all)
-                    var_all = K_aa_diag - np.sum(K_oa * L_, axis=0)
-                    var_all = np.clip(var_all, 1e-8, None)
+                # ── Posterior ─────────────────────────────────────────────────
+                with st.spinner("Computing GP posterior…"):
+                    mu_all, var_all = _gp_posterior(K_oo, K_oa, y_train_mesh, gp_noise)
  
-                # ── Metrics ───────────────────────────────────────────────
+                # ── Metrics ───────────────────────────────────────────────────
                 mu_test  = mu_all[list(test_idx)]
                 var_test = var_all[list(test_idx)]
                 y_test   = f_true_mesh[list(test_idx)]
+ 
                 rmse_val = float(np.sqrt(np.mean((mu_test - y_test) ** 2)))
-                nlpd_val = float(_nlpd(mu_test, var_test, y_test))
+                nlpd_val = _nlpd(mu_test, var_test, y_test)
                 coverage = float(np.mean(np.abs(y_test - mu_test) < 2 * np.sqrt(var_test)))
                 error_log = np.log1p((mu_all - f_true_mesh) ** 2)
  
-                # ── Coverage calibration ──────────────────────────────────
-                from scipy import stats as sp_stats
-                levels   = np.linspace(0.05, 0.99, 30)
-                cov_actual = []
-                for p in levels:
-                    z = sp_stats.norm.ppf((1 + p) / 2)
-                    cov_actual.append(float(np.mean(np.abs(y_test - mu_test) < z * np.sqrt(var_test))))
+                # Next suggested biopsy: highest posterior variance outside train set
+                cand_var = var_all.copy()
+                cand_var[list(train_idx)] = -1.0
+                next_biopsy_idx = int(np.argmax(cand_var))
  
-                # ── Metric display ────────────────────────────────────────
+                # ── Metrics display ───────────────────────────────────────────
                 st.markdown("#### Results")
-                mc1, mc2, mc3 = st.columns(3)
-                mc1.metric("RMSE (test)", f"{rmse_val:.4f}")
-                mc2.metric("NLPD (test)", f"{nlpd_val:.4f}")
-                mc3.metric("95 % Coverage", f"{coverage*100:.1f} %",
-                           delta=f"{(coverage-0.95)*100:+.1f} pp vs ideal")
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("RMSE (test)",    f"{rmse_val:.4f}")
+                mc2.metric("NLPD (test)",    f"{nlpd_val:.4f}")
+                mc3.metric("95% Coverage",   f"{coverage*100:.1f}%",
+                           delta=f"{(coverage - 0.95)*100:+.1f} pp vs ideal")
+                mc4.metric("Biopsy points",  f"{gp_ntrain} / {n_verts:,}")
  
-                # ── Mesh plot helper ──────────────────────────────────────
-                def _mesh_fig(values, title, train_i=None):
-                    fig = go.Figure(data=[go.Mesh3d(
-                        x=v_mesh[:, 0], y=v_mesh[:, 1], z=v_mesh[:, 2],
-                        i=f_mesh[:, 0], j=f_mesh[:, 1], k=f_mesh[:, 2],
-                        intensity=values,
-                        colorscale="Viridis", opacity=1.0,
-                        lighting=dict(ambient=0.5, diffuse=1, specular=0.5),
-                    )])
-                    if train_i is not None:
-                        fig.add_trace(go.Scatter3d(
-                            x=v_mesh[list(train_i), 0],
-                            y=v_mesh[list(train_i), 1],
-                            z=v_mesh[list(train_i), 2],
-                            mode="markers",
-                            marker=dict(size=3, color="cyan", opacity=0.8),
-                            name="Train (observed)"
-                        ))
-                    fig.update_layout(
-                        title=title,
-                        scene=dict(xaxis=dict(visible=False),
-                                   yaxis=dict(visible=False),
-                                   zaxis=dict(visible=False)),
-                        margin=dict(l=0, r=0, t=40, b=0),
-                        height=400,
-                    )
-                    return fig
- 
-                # ── 4-panel mesh visualization ────────────────────────────
-                st.markdown("#### Mesh Visualizations")
+                # ── 4-panel mesh plots ────────────────────────────────────────
+                st.markdown("#### Surface Maps")
                 col_m1, col_m2 = st.columns(2)
                 with col_m1:
-                    st.plotly_chart(_mesh_fig(f_true_mesh, "Ground-Truth Radiomic Field", train_idx),
-                                    use_container_width=True)
-                    st.plotly_chart(_mesh_fig(error_log, "Log Squared Error (vs ground truth)"),
-                                    use_container_width=True)
+                    st.plotly_chart(
+                        _mesh_fig(f_true_mesh, "Ground-Truth Radiomic Field", train_idx),
+                        use_container_width=True
+                    )
+                    st.plotly_chart(
+                        _mesh_fig(error_log, "Log Squared Error", colorscale="Reds"),
+                        use_container_width=True
+                    )
                 with col_m2:
-                    st.plotly_chart(_mesh_fig(mu_all, f"GP Posterior Mean ({gp_kernel})", train_idx),
-                                    use_container_width=True)
-                    # Normalize variance for display clarity
+                    st.plotly_chart(
+                        _mesh_fig(mu_all, f"GP Posterior Mean ({gp_kernel})", train_idx),
+                        use_container_width=True
+                    )
                     var_norm = (var_all - var_all.min()) / (var_all.max() - var_all.min() + 1e-12)
-                    st.plotly_chart(_mesh_fig(var_norm, "Posterior Uncertainty (normalized variance)"),
-                                    use_container_width=True)
+                    st.plotly_chart(
+                        _mesh_fig(var_norm, "Posterior Uncertainty (normalised)",
+                                  colorscale="Hot"),
+                        use_container_width=True
+                    )
  
-                # ── Variance vs geodesic distance scatter ─────────────────
-                st.markdown("#### Uncertainty vs. Geodesic Distance to Nearest Train Point")
-                st.caption("A well-specified kernel produces a smooth monotone curve — "
-                           "uncertainty grows as you move away from observations.")
+                # ── Active learning: next biopsy ──────────────────────────────
+                st.markdown("#### 🎯 Suggested Next Biopsy Location")
+                st.caption(
+                    "The surface point with the highest posterior variance — "
+                    "optimal next sampling location under a maximum-uncertainty strategy."
+                )
+                nb_coord = v_mesh[next_biopsy_idx]
+                st.info(
+                    f"**Vertex #{next_biopsy_idx}** | "
+                    f"coords ({nb_coord[0]:.3f}, {nb_coord[1]:.3f}, {nb_coord[2]:.3f}) | "
+                    f"uncertainty = {var_all[next_biopsy_idx]:.4f}"
+                )
+                fig_next = _mesh_fig(var_all, "Next Biopsy Suggestion (red ◆)",
+                                     train_i=train_idx, colorscale="Hot")
+                fig_next.add_trace(go.Scatter3d(
+                    x=[nb_coord[0]], y=[nb_coord[1]], z=[nb_coord[2]],
+                    mode="markers",
+                    marker=dict(size=8, color="red", symbol="diamond"),
+                    name="Suggested next biopsy"
+                ))
+                st.plotly_chart(fig_next, use_container_width=True)
+ 
+                # ── Variance vs geodesic distance ─────────────────────────────
+                st.markdown("#### Uncertainty vs. Geodesic Distance to Nearest Biopsy Point")
+                st.caption(
+                    "A well-specified kernel produces a smooth monotone curve — "
+                    "uncertainty grows as you move away from observations."
+                )
                 with st.spinner("Computing geodesic distances…"):
                     solver_dist = pp3d.MeshHeatMethodDistanceSolver(v_mesh, f_mesh)
-                    dist_to_train = np.min(
-                        np.stack([solver_dist.compute_distance(int(i)) for i in train_idx], axis=1),
-                        axis=1
+                    # use at most 30 train points to keep this fast
+                    sample_train = list(train_idx)[:30]
+                    dist_stack   = np.stack(
+                        [solver_dist.compute_distance(int(i)) for i in sample_train], axis=1
                     )
+                    dist_to_train = dist_stack.min(axis=1)   # (n_verts,)
+ 
                 scatter_fig = go.Figure()
                 scatter_fig.add_trace(go.Scatter(
                     x=dist_to_train[list(test_idx)],
                     y=var_all[list(test_idx)],
                     mode="markers",
-                    marker=dict(size=3, opacity=0.4, color="#58a6ff"),
-                    name="Test vertices"
+                    marker=dict(size=3, opacity=0.35, color="#58a6ff"),
+                    name="Test vertices",
                 ))
                 scatter_fig.update_layout(
-                    xaxis_title="Geodesic distance to nearest train point",
+                    xaxis_title="Geodesic distance to nearest biopsy point",
                     yaxis_title="Posterior variance",
                     height=350,
                 )
                 st.plotly_chart(scatter_fig, use_container_width=True)
  
-                # ── Calibration curve ─────────────────────────────────────
+                # ── Calibration curve ─────────────────────────────────────────
                 st.markdown("#### Calibration Curve")
-                st.caption("Points on the diagonal = perfectly calibrated uncertainty. "
-                           "Above diagonal = overconfident. Below = underconfident.")
+                st.caption(
+                    "Points on the diagonal = perfectly calibrated uncertainty. "
+                    "Above = overconfident. Below = underconfident."
+                )
+                levels     = np.linspace(0.05, 0.99, 30)
+                cov_actual = []
+                for p in levels:
+                    z = sp_stats.norm.ppf((1 + p) / 2)
+                    cov_actual.append(
+                        float(np.mean(np.abs(y_test - mu_test) < z * np.sqrt(var_test)))
+                    )
+ 
                 cal_fig = go.Figure()
-                cal_fig.add_trace(go.Scatter(
-                    x=levels, y=cov_actual,
-                    mode="lines+markers",
-                    marker=dict(size=4),
-                    line=dict(color="#f78166"),
-                    name="Actual coverage"
-                ))
                 cal_fig.add_trace(go.Scatter(
                     x=[0, 1], y=[0, 1],
                     mode="lines",
                     line=dict(dash="dash", color="gray"),
-                    name="Perfect calibration"
+                    name="Perfect calibration",
+                ))
+                cal_fig.add_trace(go.Scatter(
+                    x=levels.tolist(), y=cov_actual,
+                    mode="lines+markers",
+                    marker=dict(size=4),
+                    line=dict(color="#f78166"),
+                    name="Actual coverage",
                 ))
                 cal_fig.update_layout(
                     xaxis_title="Expected coverage level",
@@ -690,17 +748,20 @@ with tab5:
                 )
                 st.plotly_chart(cal_fig, use_container_width=True)
  
-                # ── Kernel matrix ─────────────────────────────────────────
+                # ── Train–train kernel matrix ─────────────────────────────────
                 st.markdown("#### Train–Train Kernel Matrix")
-                st.caption("Reveals the similarity structure the GP is using between observed points.")
-                km_fig = px.imshow(K_oo, color_continuous_scale="Viridis",
-                                   title=f"{gp_kernel} kernel matrix (train × train)")
+                st.caption("Reveals the similarity structure between observed biopsy points.")
+                km_fig = px.imshow(
+                    K_oo,
+                    color_continuous_scale="Viridis",
+                    title=f"{gp_kernel} kernel matrix (train × train)",
+                )
                 st.plotly_chart(km_fig, use_container_width=True)
  
         else:
             st.info("Upload a .obj mesh file above to enable GP-on-surface analysis.")
  
-        # ── Data sources guide ────────────────────────────────────────────────
+        # ── Data sources ──────────────────────────────────────────────────────
         with st.expander("📦 Where to find tumor mesh data"):
             st.markdown("""
 **Synthetic / test meshes (no registration needed)**
@@ -708,17 +769,20 @@ with tab5:
 - [Thingi10K](https://ten-thousand-models.appspot.com/) — 10 000 real-world meshes
  
 **Real tumor meshes from medical imaging**
-1. **TCIA (The Cancer Imaging Archive)** — `https://www.cancerimagingarchive.net`  
-   Download a CT/MRI DICOM series (e.g. TCGA-GBM, RIDER Breast MRI).
-2. Open in **3D Slicer** (free) → `Segment Editor` → paint the lesion → `Export to file` → choose `.obj`.
-3. Load the exported `.obj` here.
+1. **TCIA** — `https://www.cancerimagingarchive.net` — download CT/MRI DICOM series (e.g. TCGA-GBM).
+2. Open in **3D Slicer** (free) → `Segment Editor` → paint the lesion → `Export to file` → `.obj`.
+3. Upload the exported `.obj` here.
  
 **Pre-segmented surface datasets**
 - [Medical Segmentation Decathlon](http://medicaldecathlon.com/) — liver, brain, prostate (NIfTI → convert with 3D Slicer)
 - [SegTHOR](https://competitions.codalab.org/competitions/21145) — thoracic organ surfaces
  
-**Quick pipeline:**
-```
-DICOM → 3D Slicer (segment lesion) → Export .obj → Upload here
+**NIfTI → mesh (Python)**
+```python
+import nibabel as nib, pymcubes
+seg = nib.load("tumor_seg.nii.gz").get_fdata()
+verts, faces = pymcubes.marching_cubes(seg, 0.5)
+pymcubes.export_obj(verts, faces, "tumor.obj")
 ```
 """)
+ 
