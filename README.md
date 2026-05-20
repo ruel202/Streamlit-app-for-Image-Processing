@@ -21,7 +21,7 @@ git clone https://huggingface.co/spaces/[your-username]/radiomics-texture-lab
 cd radiomics-texture-lab
 
 pip install -r requirements.txt
-
+python generate_samples_brain.py
 streamlit run app.py
 ```
 
