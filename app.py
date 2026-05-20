@@ -418,8 +418,7 @@ with tab5:
         mesh_file = st.file_uploader(
             "Upload tumor mesh (.obj)", type=["obj"], key="mesh_upload"
         )
-        st.markdown("**No mesh yet?** Download a free example:")
-        st.code("https://github.com/alecjacobson/common-3d-test-models  (e.g. spot.obj, armadillo.obj)")
+       
         st.caption(
             "For a real tumor mesh: export an .obj from 3D Slicer after segmenting "
             "a lesion in a NIfTI scan."
@@ -761,28 +760,5 @@ with tab5:
         else:
             st.info("Upload a .obj mesh file above to enable GP-on-surface analysis.")
  
-        # ── Data sources ──────────────────────────────────────────────────────
-        with st.expander("📦 Where to find tumor mesh data"):
-            st.markdown("""
-**Synthetic / test meshes (no registration needed)**
-- [common-3d-test-models](https://github.com/alecjacobson/common-3d-test-models) — spot.obj, armadillo.obj, bunny.obj
-- [Thingi10K](https://ten-thousand-models.appspot.com/) — 10 000 real-world meshes
- 
-**Real tumor meshes from medical imaging**
-1. **TCIA** — `https://www.cancerimagingarchive.net` — download CT/MRI DICOM series (e.g. TCGA-GBM).
-2. Open in **3D Slicer** (free) → `Segment Editor` → paint the lesion → `Export to file` → `.obj`.
-3. Upload the exported `.obj` here.
- 
-**Pre-segmented surface datasets**
-- [Medical Segmentation Decathlon](http://medicaldecathlon.com/) — liver, brain, prostate (NIfTI → convert with 3D Slicer)
-- [SegTHOR](https://competitions.codalab.org/competitions/21145) — thoracic organ surfaces
- 
-**NIfTI → mesh (Python)**
-```python
-import nibabel as nib, pymcubes
-seg = nib.load("tumor_seg.nii.gz").get_fdata()
-verts, faces = pymcubes.marching_cubes(seg, 0.5)
-pymcubes.export_obj(verts, faces, "tumor.obj")
-```
-""")
+       
  
