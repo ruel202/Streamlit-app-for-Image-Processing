@@ -32,36 +32,12 @@ def load_nifti_slice(file, slice_index=None) -> np.ndarray:
     return slc.astype(np.uint8)
 
 def apply_clahe(img: np.ndarray, clip_limit: float = 1.5, tile_grid: tuple = (8, 8)) -> np.ndarray:
-    """
-    Apply Contrast Limited Adaptive Histogram Equalization.
-    Normalizes local contrast without over-amplifying noise.
-
-    Args:
-        img: uint8 grayscale image
-        clip_limit: threshold for contrast limiting
-        tile_grid: size of the grid for histogram equalization
-
-    Returns:
-        uint8 CLAHE-enhanced image
-    """
+    
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
     return clahe.apply(img)
 
 
 def extract_roi(img: np.ndarray, bbox: tuple) -> np.ndarray:
-    """
-    Extract a rectangular region of interest.
-
-    Args:
-        img: 2D grayscale array
-        bbox: (x1, y1, x2, y2) in pixel coordinates
-
-    Returns:
-        Cropped 2D array
-
-    Raises:
-        ValueError: if bbox is invalid or results in empty ROI
-    """
     x1, y1, x2, y2 = bbox
 
     if x2 <= x1 or y2 <= y1:
@@ -82,20 +58,7 @@ def extract_roi(img: np.ndarray, bbox: tuple) -> np.ndarray:
 
 
 def sliding_window_entropy(img: np.ndarray, window: int = 15) -> np.ndarray:
-    """
-    Compute Shannon entropy in a sliding window over the image.
-    Returns a float map of the same spatial dimensions.
-
-    Design note: We pad with reflect mode so the output has the same shape
-    as the input — no shrinkage at borders.
-
-    Args:
-        img: uint8 grayscale image
-        window: side length of the square kernel (must be odd)
-
-    Returns:
-        float32 entropy map, same shape as img
-    """
+   
     from skimage.filters.rank import entropy as rank_entropy
     from skimage.morphology import disk
 
