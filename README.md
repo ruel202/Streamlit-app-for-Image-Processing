@@ -1,4 +1,4 @@
-# 🧠 Radiomics Texture Lab
+#  Radiomics Texture Lab
 
 ## Goal 
 
