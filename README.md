@@ -15,7 +15,7 @@ Plus a **sliding-window entropy map** for spatial heterogeneity visualization.
 ## Local Setup
 
 ```bash
-git clone https://huggingface.co/spaces/[your-username]/radiomics-texture-lab
+git clone https://huggingface.co/spaces/ruel202/radiomics-texture-lab
 cd radiomics-texture-lab
 
 pip install -r requirements.txt
