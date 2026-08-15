@@ -56,7 +56,3 @@ Metrics collected from the public domains data sets
 - **Entropy map is slow** for large images (>1024px); resize first
 - **Radial power spectrum assumes isotropy** — strongly directional textures (ribs, vessels) are better characterized by the GLCM polar chart
 - **GLCM quantized to 64 levels** — reduces sparsity in small ROIs but loses fine intensity detail
-
-## Screenshots
-
-`[add screenshots or GIF here]`
