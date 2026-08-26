@@ -10,7 +10,7 @@
 
 Plus a **sliding-window entropy map** for spatial heterogeneity visualization.
 
-https://huggingface.co/spaces/ruel202/radiomics-texture-lab
+https://huggingface.co/ruel202/Radiomic_TextureLab
 
 ## Local Setup
 
