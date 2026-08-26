@@ -10,7 +10,7 @@
 
 Plus a **sliding-window entropy map** for spatial heterogeneity visualization.
 
-
+https://huggingface.co/spaces/ruel202/radiomics-texture-lab
 
 ## Local Setup
 
@@ -24,8 +24,6 @@ python generate_samples_brain.py
 
 streamlit run app.py
 ```
-
-App runs at `http://localhost:8501`
 
 ## Project Structure
 
